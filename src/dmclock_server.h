@@ -326,6 +326,12 @@ namespace crimson {
 
 	C                     client;
 	RequestTag            prev_tag;
+
+	// by copying the next requests tag here, we remove a level of
+	// indirection when doing heap adjustments
+	bool                  has_next_req;
+	RequestTag            next_req_tag;
+
 	std::deque<ClientReq> requests;
 
 	// amount added from the proportion tag as a result of
@@ -352,6 +358,7 @@ namespace crimson {
 		  Counter current_tick) :
 	  client(_client),
 	  prev_tag(0.0, 0.0, 0.0, TimeZero),
+	  next_req_tag(0.0, 0.0, 0.0, TimeZero),
 	  info(_info),
 	  idle(true),
 	  last_tick(current_tick),
@@ -381,7 +388,11 @@ namespace crimson {
 	}
 
 	inline void add_request(const RequestTag& tag, RequestRef&& request) {
+	  bool update = requests.empty();
 	  requests.emplace_back(tag, client, std::move(request));
+	  if (update) {
+	    update_next_req_tag();
+	  }
 	}
 
 	inline const ClientReq& next_request() const {
@@ -394,6 +405,17 @@ namespace crimson {
 
 	inline void pop_request() {
 	  requests.pop_front();
+	  update_next_req_tag();
+	}
+
+	inline void update_next_req_tag() {
+	  if (has_request()) {
+	    const auto& r = next_request();
+	    next_req_tag = r.tag;
+	    has_next_req = true;
+	  } else {
+	    has_next_req = false;
+	  }
 	}
 
 	inline bool has_request() const {
@@ -418,6 +440,9 @@ namespace crimson {
 	      ++i;
 	    }
 	  }
+	  if (any_removed) {
+	    update_next_req_tag();
+	  }
 	  return any_removed;
 	}
 
@@ -434,6 +459,9 @@ namespace crimson {
 	    } else {
 	      ++i;
 	    }
+	  }
+	  if (any_removed) {
+	    update_next_req_tag();
 	  }
 	  return any_removed;
 	}
@@ -464,6 +492,11 @@ namespace crimson {
 	  out << " }";
 
 	  return out;
+	}
+
+	inline void clear_requests() {
+	  requests.clear();
+	  has_next_req = false;
 	}
       }; // class ClientRec
 
@@ -583,7 +616,7 @@ namespace crimson {
 	  }
 	}
 
-	i->second->requests.clear();
+	i->second->clear_requests();
 
 	resv_heap.adjust(*i->second);
 	limit_heap.adjust(*i->second);
@@ -693,10 +726,11 @@ namespace crimson {
 	       bool use_prop_delta>
       struct ClientCompare {
 	bool operator()(const ClientRec& n1, const ClientRec& n2) const {
-	  if (n1.has_request()) {
-	    if (n2.has_request()) {
-	      const auto& t1 = n1.next_request().tag;
-	      const auto& t2 = n2.next_request().tag;
+	  if (n1.has_next_req) {
+	    if (n2.has_next_req) {
+	      // both n1 and n2 have requests
+	      const auto& t1 = n1.next_req_tag;
+	      const auto& t2 = n2.next_req_tag;
 	      if (ReadyOption::ignore == ready_opt || t1.ready == t2.ready) {
 		// if we don't care about ready or the ready values are the same
 		if (use_prop_delta) {
@@ -715,11 +749,9 @@ namespace crimson {
 	      // n1 has request but n2 does not
 	      return true;
 	    }
-	  } else if (n2.has_request()) {
-	    // n2 has request but n1 does not
-	    return false;
 	  } else {
-	    // both have none; keep stable w false
+	    // either n2 has request but n1 does not, or neither has
+	    // one; either way we'll keep things stable with false
 	    return false;
 	  }
 	}
